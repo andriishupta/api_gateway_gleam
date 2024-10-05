@@ -14,7 +14,7 @@ pub fn main() {
   wisp.configure_logger()
 
   let secret_key_base = wisp.random_string(64)
-  let port = env.get_int_or("PORT", 3000)
+  let port = env.get_int_or("PORT", 8080)
 
   let assert Ok(_) =
     router.handle_request
