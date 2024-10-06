@@ -1,75 +1,80 @@
+import gleam/bit_array
 import gleam/http
-import gleam/string_builder
+import gleam/option.{None, Some}
+
 import wisp
 
-pub fn handle_request(req: wisp.Request) -> wisp.Response {
-  // setup common middleware
+import cache.{type Cache}
+
+pub type RouterContext {
+  RouterContext(cache: Cache)
+}
+
+pub fn handle_request(
+  req: wisp.Request,
+  context: RouterContext,
+) -> wisp.Response {
+  wisp.log_info("request started for path: " <> req.path)
+
+  wisp.log_info("setup common middleware")
   let req = wisp.method_override(req)
   use <- wisp.log_request(req)
   use <- wisp.rescue_crashes
   use req <- wisp.handle_head(req)
 
-  // Wisp doesn't have a special router abstraction, instead we recommend using
-  // regular old pattern matching. This is faster than a router, is type safe,
-  // and means you don't have to learn or be limited by a special DSL.
-  //
-  case wisp.path_segments(req) {
-    // This matches `/`.
-    [] -> home_page(req)
+  use req <- use_cache_value(req, context.cache, req.path)
 
-    // This matches `/comments`.
-    ["comments"] -> comments(req)
-
-    // This matches `/comments/:id`.
-    // The `id` segment is bound to a variable and passed to the handler.
-    ["comments", id] -> show_comment(req, id)
-
-    // This matches all other paths.
-    _ -> wisp.not_found()
-  }
-}
-
-fn home_page(req: wisp.Request) -> wisp.Response {
-  // The home page can only be accessed via GET requests, so this middleware is
-  // used to return a 405: Method Not Allowed response for all other methods.
-  use <- wisp.require_method(req, http.Get)
-
-  let html = string_builder.from_string("Hello, Joe!")
-  wisp.ok()
-  |> wisp.html_body(html)
-}
-
-fn comments(req: wisp.Request) -> wisp.Response {
-  // This handler for `/comments` can respond to both GET and POST requests,
-  // so we pattern match on the method here.
+  wisp.log_info("cache, if possible")
   case req.method {
-    http.Get -> list_comments()
-    http.Post -> create_comment(req)
-    _ -> wisp.method_not_allowed([http.Get, http.Post])
+    http.Post | http.Put | http.Patch -> {
+      wisp.log_info(
+        "["
+        <> http.method_to_string(req.method)
+        <> "]"
+        <> " caching for key: "
+        <> req.path,
+      )
+
+      let assert Ok(body) = wisp.read_body_to_bitstring(req)
+      let assert Ok(body_string) = bit_array.to_string(body)
+
+      cache.set_cache_value(context.cache, req.path, body_string)
+
+      wisp.ok()
+      |> wisp.string_body(body_string)
+    }
+    _ -> {
+      wisp.log_info(
+        "["
+        <> http.method_to_string(req.method)
+        <> "]"
+        <> " skipping caching - no body expected",
+      )
+      wisp.ok()
+    }
   }
 }
 
-fn list_comments() -> wisp.Response {
-  // In a later example we'll show how to read from a database.
-  let html = string_builder.from_string("Comments!")
-  wisp.ok()
-  |> wisp.html_body(html)
-}
+pub fn use_cache_value(
+  req: wisp.Request,
+  cache: Cache,
+  key: String,
+  otherwise alternative: fn(wisp.Request) -> wisp.Response,
+) -> wisp.Response {
+  wisp.log_info("use cache or continue")
 
-fn create_comment(_req: wisp.Request) -> wisp.Response {
-  // In a later example we'll show how to parse data from the request body.
-  let html = string_builder.from_string("Created")
-  wisp.created()
-  |> wisp.html_body(html)
-}
+  let cache_value = cache.get_cache_value(cache, key)
 
-fn show_comment(req: wisp.Request, id: String) -> wisp.Response {
-  use <- wisp.require_method(req, http.Get)
+  case cache_value {
+    Some(value) -> {
+      wisp.log_info("cache found for key: " <> key)
 
-  // The `id` path parameter has been passed to this function, so we could use
-  // it to look up a comment in a database.
-  // For now we'll just include in the response body.
-  let html = string_builder.from_string("Comment with id " <> id)
-  wisp.ok()
-  |> wisp.html_body(html)
+      wisp.ok()
+      |> wisp.string_body(value)
+    }
+    None -> {
+      wisp.log_info("no cache found for key: " <> key)
+      alternative(req)
+    }
+  }
 }
